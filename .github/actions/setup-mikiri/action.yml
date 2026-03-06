@@ -1,0 +1,30 @@
+name: Setup Mikiri
+description: Install the Mikiri CLI for performance analysis
+branding:
+  icon: zap
+  color: green
+
+inputs:
+  api-key:
+    description: "Mikiri API key for authentication. If not set, reads from MIKIRI_API_KEY env var."
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - name: Install mikiri
+      shell: bash
+      run: curl -fsSL https://mikiri.dev/install.sh | bash
+
+    - name: Configure API key
+      if: inputs.api-key != ''
+      shell: bash
+      run: |
+        mkdir -p ~/.config/mikiri
+        echo '{"api_key":"${{ inputs.api-key }}"}' > ~/.config/mikiri/credentials.json
+
+    - name: Verify installation
+      shell: bash
+      run: |
+        mikiri --version
+        echo "Mikiri installed successfully"

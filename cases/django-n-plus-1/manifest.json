@@ -1,0 +1,28 @@
+{
+  "name": "django-n-plus-1",
+  "framework": "django",
+  "db": "sqlite",
+  "python": ">=3.11",
+  "entrypoint": "config.asgi:application",
+  "seed": "python seed.py",
+  "endpoints": [
+    "/api/users/1/orders",
+    "/api/orders"
+  ],
+  "issues": [
+    {
+      "type": "n_plus_1",
+      "endpoint": "/api/users/{user_id}/orders",
+      "location": "store/views.py::get_user_orders",
+      "severity": "high",
+      "description": "Missing select_related/prefetch_related: iterates orders, then line_items per order, then product per line_item"
+    },
+    {
+      "type": "n_plus_1",
+      "endpoint": "/api/orders",
+      "location": "store/views.py::list_orders",
+      "severity": "high",
+      "description": "Missing select_related/prefetch_related: lists all orders with nested line_items and products"
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "name": "fastapi-n-plus-1",
+  "framework": "fastapi",
+  "db": "postgresql",
+  "python": ">=3.11",
+  "entrypoint": "app:app",
+  "seed": "python seed.py",
+  "endpoints": [
+    "/api/users/1/orders",
+    "/api/orders"
+  ],
+  "issues": [
+    {
+      "type": "n_plus_1",
+      "endpoint": "/api/users/{user_id}/orders",
+      "location": "app.py::get_user_orders",
+      "severity": "high",
+      "description": "Async SQLAlchemy with selectin loading still generates per-relationship-level queries for orders, line_items, and products"
+    },
+    {
+      "type": "n_plus_1",
+      "endpoint": "/api/orders",
+      "location": "app.py::list_orders",
+      "severity": "high",
+      "description": "Listing all orders triggers selectin loads for line_items and products per batch"
+    }
+  ]
+}

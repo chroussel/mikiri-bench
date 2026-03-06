@@ -1,0 +1,160 @@
+name: bench
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # daily at 06:00 UTC
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  MIKIRI_API_KEY: ${{ secrets.MIKIRI_API_KEY }}
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup mikiri
+        uses: ./.github/actions/setup-mikiri
+        with:
+          api-key: ${{ secrets.MIKIRI_API_KEY }}
+
+      - name: Run benchmark
+        env:
+          DATABASE_URL: postgresql+psycopg://postgres:test@localhost:5432/test
+        run: |
+          set -euo pipefail
+
+          for case_dir in cases/*/; do
+            case_name="$(basename "$case_dir")"
+            echo "::group::$case_name"
+
+            manifest="$case_dir/manifest.json"
+            if [[ ! -f "$manifest" ]]; then
+              echo "Skipping $case_name (no manifest.json)"
+              echo "::endgroup::"
+              continue
+            fi
+
+            db=$(python3 -c "import json; print(json.load(open('$manifest'))['db'])")
+            seed_cmd=$(python3 -c "import json; print(json.load(open('$manifest'))['seed'])")
+
+            # Reset PostgreSQL database for pg cases
+            if [[ "$db" == "postgresql" ]]; then
+              PGPASSWORD=test psql -h localhost -U postgres -c "DROP DATABASE IF EXISTS test;" 2>/dev/null
+              PGPASSWORD=test psql -h localhost -U postgres -c "CREATE DATABASE test;" 2>/dev/null
+            fi
+
+            # Set up virtualenv and install deps
+            python3 -m venv "$case_dir/.venv"
+            "$case_dir/.venv/bin/pip" install -q -r "$case_dir/requirements.txt"
+
+            # Seed
+            (cd "$case_dir" && .venv/bin/python seed.py)
+
+            # Run mikiri
+            mkdir -p "results/$case_name"
+            (cd "$case_dir" && mikiri run --json > "../../results/$case_name/output.json" 2>"../../results/$case_name/stderr.log") || true
+
+            # Copy report if generated
+            if [[ -f "$case_dir/mikiri_report.md" ]]; then
+              cp "$case_dir/mikiri_report.md" "results/$case_name/report.md"
+            fi
+
+            echo "::endgroup::"
+          done
+
+      - name: Score results
+        run: python3 score.py
+
+      - name: Generate scorecard JSON
+        run: python3 score.py --json > results/scorecard.json
+
+      - name: Build dashboard
+        run: |
+          # Checkout existing history from gh-pages
+          git worktree add /tmp/gh-pages gh-pages 2>/dev/null || {
+            git worktree add --detach /tmp/gh-pages
+            cd /tmp/gh-pages
+            git checkout --orphan gh-pages
+            git rm -rf . 2>/dev/null || true
+            echo '[]' > history.json
+            git add history.json
+            git commit -m "init gh-pages"
+          }
+
+          # Append today's scorecard to history
+          python3 -c "
+          import json, datetime
+          history_path = '/tmp/gh-pages/history.json'
+          try:
+              with open(history_path) as f:
+                  history = json.load(f)
+          except (FileNotFoundError, json.JSONDecodeError):
+              history = []
+
+          with open('results/scorecard.json') as f:
+              scorecard = json.load(f)
+
+          scorecard['date'] = datetime.date.today().isoformat()
+          scorecard['run_number'] = ${{ github.run_number }}
+
+          # Keep last 365 entries
+          history.append(scorecard)
+          history = history[-365:]
+
+          with open(history_path, 'w') as f:
+              json.dump(history, f, indent=2)
+          "
+
+          # Generate dashboard HTML
+          python3 dashboard.py /tmp/gh-pages/history.json /tmp/gh-pages/index.html
+
+          # Copy latest results
+          cp results/scorecard.json /tmp/gh-pages/latest.json
+
+      - name: Deploy to GitHub Pages
+        run: |
+          cd /tmp/gh-pages
+          git add -A
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "bench results ${{ github.run_number }}"
+          git push origin gh-pages
+
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-${{ github.run_number }}
+          path: results/
+          retention-days: 90

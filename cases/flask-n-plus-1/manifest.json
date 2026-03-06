@@ -1,0 +1,28 @@
+{
+  "name": "flask-n-plus-1",
+  "framework": "flask",
+  "db": "sqlite",
+  "python": ">=3.11",
+  "entrypoint": "app:app",
+  "seed": "python seed.py",
+  "endpoints": [
+    "/api/users/1/orders",
+    "/api/orders"
+  ],
+  "issues": [
+    {
+      "type": "n_plus_1",
+      "endpoint": "/api/users/{user_id}/orders",
+      "location": "app.py::get_user_orders",
+      "severity": "high",
+      "description": "SQLAlchemy lazy-loading orders, line_items, and products via to_dict_with_orders()"
+    },
+    {
+      "type": "n_plus_1",
+      "endpoint": "/api/orders",
+      "location": "app.py::list_orders",
+      "severity": "high",
+      "description": "SQLAlchemy lazy-loading line_items and products for every order via to_dict_full()"
+    }
+  ]
+}

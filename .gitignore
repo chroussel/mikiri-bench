@@ -1,0 +1,8 @@
+results/
+cases/*/.venv/
+cases/*/__pycache__/
+cases/*/db.sqlite3
+cases/*/.mikiri/
+cases/*/mikiri_report.md
+cases/*/mikiri_output.json
+*.pyc
