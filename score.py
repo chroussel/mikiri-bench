@@ -48,9 +48,12 @@ def match_issue(expected: dict, findings: list[dict]) -> bool:
     return False
 
 
-def score_case(case_name: str) -> dict:
+def score_case(case_name: str, model: str | None = None) -> dict:
     case_dir = CASES_DIR / case_name
-    result_dir = RESULTS_DIR / case_name
+    if model:
+        result_dir = RESULTS_DIR / model / case_name
+    else:
+        result_dir = RESULTS_DIR / case_name
 
     manifest = load_manifest(case_dir)
     result = load_result(result_dir)
@@ -101,13 +104,16 @@ def score_case(case_name: str) -> dict:
     }
 
 
-def print_table(scores: list[dict]):
+def print_table(scores: list[dict], model: str | None = None):
     """Print a summary table."""
     total_issues = sum(s["total"] for s in scores)
     total_detected = sum(s["detected"] for s in scores)
 
     print()
-    print(f"mikiri-bench scorecard")
+    header = f"mikiri-bench scorecard"
+    if model:
+        header += f" [{model}]"
+    print(header)
     print(f"={'=' * 55}")
     print(f"{'Case':<30} {'Issues':>6} {'Found':>6} {'Missed':>6}")
     print(f"{'-' * 30} {'-' * 6} {'-' * 6} {'-' * 6}")
@@ -127,9 +133,12 @@ def print_table(scores: list[dict]):
 
 
 def main():
-    fmt = "table"
-    if "--json" in sys.argv:
-        fmt = "json"
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Score mikiri-bench results")
+    parser.add_argument("--json", action="store_true", help="Output as JSON")
+    parser.add_argument("--model", type=str, default=None, help="Score results for a specific model")
+    args = parser.parse_args()
 
     case_dirs = sorted(CASES_DIR.iterdir())
     scores = []
@@ -140,10 +149,11 @@ def main():
         manifest_path = case_dir / "manifest.json"
         if not manifest_path.exists():
             continue
-        scores.append(score_case(case_dir.name))
+        scores.append(score_case(case_dir.name, model=args.model))
 
-    if fmt == "json":
+    if args.json:
         scorecard = {
+            "model": args.model or "default",
             "total_issues": sum(s["total"] for s in scores),
             "total_detected": sum(s["detected"] for s in scores),
             "detection_rate": (
@@ -155,7 +165,7 @@ def main():
         }
         print(json.dumps(scorecard, indent=2))
     else:
-        print_table(scores)
+        print_table(scores, model=args.model)
 
 
 if __name__ == "__main__":

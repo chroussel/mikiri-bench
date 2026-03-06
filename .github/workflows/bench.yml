@@ -2,8 +2,12 @@ name: bench
 
 on:
   schedule:
-    - cron: "0 6 * * *" # daily at 06:00 UTC
+    - cron: "0 6 * * 1" # weekly on Monday at 06:00 UTC
   workflow_dispatch:
+    inputs:
+      models:
+        description: "Comma-separated list of models to bench (leave empty for all)"
+        required: false
   push:
     branches: [main]
 
@@ -13,6 +17,13 @@ env:
 jobs:
   bench:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        model:
+          - gpt-5.3-codex-xhigh
+          - claude-opus-4-6
+          - glm-5
 
     services:
       postgres:
@@ -29,15 +40,8 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
-    permissions:
-      contents: write
-      pages: write
-      id-token: write
-
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -48,11 +52,12 @@ jobs:
         with:
           api-key: ${{ secrets.MIKIRI_API_KEY }}
 
-      - name: Run benchmark
+      - name: Run benchmark (${{ matrix.model }})
         env:
           DATABASE_URL: postgresql+psycopg://postgres:test@localhost:5432/test
         run: |
           set -euo pipefail
+          MODEL="${{ matrix.model }}"
 
           for case_dir in cases/*/; do
             case_name="$(basename "$case_dir")"
@@ -75,29 +80,64 @@ jobs:
             fi
 
             # Set up virtualenv and install deps
-            python3 -m venv "$case_dir/.venv"
-            "$case_dir/.venv/bin/pip" install -q -r "$case_dir/requirements.txt"
+            if [[ ! -d "$case_dir/.venv" ]]; then
+              python3 -m venv "$case_dir/.venv"
+              "$case_dir/.venv/bin/pip" install -q -r "$case_dir/requirements.txt"
+            fi
 
             # Seed
             (cd "$case_dir" && .venv/bin/python seed.py)
 
-            # Run mikiri
-            mkdir -p "results/$case_name"
-            (cd "$case_dir" && mikiri run --json > "../../results/$case_name/output.json" 2>"../../results/$case_name/stderr.log") || true
+            # Run mikiri with model override
+            mkdir -p "results/$MODEL/$case_name"
+            (cd "$case_dir" && mikiri run --json --model "$MODEL" \
+              > "../../results/$MODEL/$case_name/output.json" \
+              2>"../../results/$MODEL/$case_name/stderr.log") || true
 
             # Copy report if generated
             if [[ -f "$case_dir/mikiri_report.md" ]]; then
-              cp "$case_dir/mikiri_report.md" "results/$case_name/report.md"
+              cp "$case_dir/mikiri_report.md" "results/$MODEL/$case_name/report.md"
             fi
 
             echo "::endgroup::"
           done
 
-      - name: Score results
-        run: python3 score.py
+      - name: Score results (${{ matrix.model }})
+        run: python3 score.py --model "${{ matrix.model }}"
 
       - name: Generate scorecard JSON
-        run: python3 score.py --json > results/scorecard.json
+        run: python3 score.py --model "${{ matrix.model }}" --json > "results/${{ matrix.model }}/scorecard.json"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.model }}-${{ github.run_number }}
+          path: results/${{ matrix.model }}/
+          retention-days: 90
+
+  dashboard:
+    needs: bench
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          path: results/
+          pattern: bench-*
+          merge-multiple: false
 
       - name: Build dashboard
         run: |
@@ -107,30 +147,35 @@ jobs:
             cd /tmp/gh-pages
             git checkout --orphan gh-pages
             git rm -rf . 2>/dev/null || true
-            echo '[]' > history.json
+            echo '{}' > history.json
             git add history.json
             git commit -m "init gh-pages"
           }
 
-          # Append today's scorecard to history
+          # Merge all model scorecards into history
           python3 -c "
-          import json, datetime
+          import json, datetime, glob
+
           history_path = '/tmp/gh-pages/history.json'
           try:
               with open(history_path) as f:
                   history = json.load(f)
           except (FileNotFoundError, json.JSONDecodeError):
-              history = []
+              history = {}
 
-          with open('results/scorecard.json') as f:
-              scorecard = json.load(f)
+          # history is { model: [ {date, ...}, ... ] }
+          for scorecard_path in glob.glob('results/bench-*/scorecard.json'):
+              with open(scorecard_path) as f:
+                  scorecard = json.load(f)
 
-          scorecard['date'] = datetime.date.today().isoformat()
-          scorecard['run_number'] = ${{ github.run_number }}
+              model = scorecard.get('model', 'unknown')
+              scorecard['date'] = datetime.date.today().isoformat()
+              scorecard['run_number'] = ${{ github.run_number }}
 
-          # Keep last 365 entries
-          history.append(scorecard)
-          history = history[-365:]
+              if model not in history:
+                  history[model] = []
+              history[model].append(scorecard)
+              history[model] = history[model][-365:]
 
           with open(history_path, 'w') as f:
               json.dump(history, f, indent=2)
@@ -139,8 +184,11 @@ jobs:
           # Generate dashboard HTML
           python3 dashboard.py /tmp/gh-pages/history.json /tmp/gh-pages/index.html
 
-          # Copy latest results
-          cp results/scorecard.json /tmp/gh-pages/latest.json
+          # Copy latest scorecards
+          for f in results/bench-*/scorecard.json; do
+            model=$(basename "$(dirname "$f")" | sed 's/^bench-//' | sed 's/-[0-9]*$//')
+            cp "$f" "/tmp/gh-pages/latest-${model}.json" 2>/dev/null || true
+          done
 
       - name: Deploy to GitHub Pages
         run: |
@@ -151,10 +199,3 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git commit -m "bench results ${{ github.run_number }}"
           git push origin gh-pages
-
-      - name: Upload results artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: bench-results-${{ github.run_number }}
-          path: results/
-          retention-days: 90
